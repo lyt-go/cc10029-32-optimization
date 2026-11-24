@@ -28,6 +28,15 @@
       </span>
     </p>
 
+    <section v-if="recoveryNotices.length" class="recovery-panel" data-testid="recovery-panel">
+      <h3 class="recovery-title">中断恢复提示</h3>
+      <ul class="recovery-list">
+        <li v-for="notice in recoveryNotices" :key="notice.key" class="recovery-item" :data-testid="`recovery-${notice.key}`">
+          {{ notice.text }}
+        </li>
+      </ul>
+    </section>
+
     <form class="filter-bar" @submit.prevent="reload">
       <label v-for="field in filterFields" :key="field" class="filter-item">
         <span>{{ field }}</span>
@@ -47,8 +56,16 @@
       </thead>
       <tbody>
         <tr v-for="row in rows" :key="String(row.id)" :data-testid="`row-${row.id}`" :data-status="String(row.status)">
-          <td v-for="column in meta.fields" :key="column">{{ row[column] ?? '—' }}</td>
-          <td>{{ row.status }}</td>
+          <td v-for="column in meta.fields" :key="column">
+            <template v-if="JSON_FIELDS.has(column)">
+              <pre v-if="parseJsonCell(row[column])" class="json-cell">{{ formatJsonCell(row[column]) }}</pre>
+              <span v-else>{{ row[column] ?? '—' }}</span>
+            </template>
+            <template v-else>{{ row[column] ?? '—' }}</template>
+          </td>
+          <td>
+            <span :class="{ 'status-warn': isAttentionStatus(String(row.status)) }">{{ row.status }}</span>
+          </td>
           <td class="row-actions">
             <button
               v-for="action in meta.actions"
@@ -129,6 +146,73 @@ const statusSummary = computed(() =>
     count: rows.value.filter((row) => String(row.status) === status).length,
   })),
 )
+
+// 后端以 JSON 字符串承载的结构化字段，工作台需要格式化后再展示
+const JSON_FIELDS = new Set(['消费分片', '源批信息'])
+const ATTENTION_STATUSES = new Set(['落地中', '待清单确认', '存在差异', '未通过', '已失败'])
+
+function parseJsonCell(value: unknown): Record<string, unknown> | unknown[] | null {
+  if (typeof value !== 'string') {
+    return null
+  }
+  const trimmed = value.trim()
+  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) {
+    return null
+  }
+  try {
+    return JSON.parse(trimmed) as Record<string, unknown> | unknown[]
+  } catch {
+    return null
+  }
+}
+
+function formatJsonCell(value: unknown): string {
+  const parsed = parseJsonCell(value)
+  return parsed === null ? String(value ?? '') : JSON.stringify(parsed, null, 2)
+}
+
+function isAttentionStatus(status: string): boolean {
+  return ATTENTION_STATUSES.has(status)
+}
+
+// 值班人员重新进入工作台时的中断恢复视角：
+// - 暂存落地：哪些分区清单未确认、已确认到第几片；
+// - 到达对账：哪些请求在等新清单确认、自动续做时将消费哪些分片，以及旧分区已结算结果。
+const recoveryNotices = computed(() => {
+  const notices: { key: string; text: string }[] = []
+  if (props.moduleKey === 'staging_area') {
+    rows.value
+      .filter((row) => String(row['清单状态']) === 'partial')
+      .forEach((row, index) => {
+        notices.push({
+          key: `staging-${row.id}-${index}`,
+          text: `分区 ${row['暂存编号']}（批次 ${row['批次编号']}，代际 ${row['代际']}）落地中断：已确认分片 ${row['已确认分片']}/${row['分片规划']}，清单 ${row['清单编号']} 待补齐末片后确认，恢复入口将自动续做。`,
+        })
+      })
+  }
+  if (props.moduleKey === 'arrival_reconcile') {
+    rows.value
+      .filter((row) => String(row.status) === '待清单确认')
+      .forEach((row, index) => {
+        const scope = parseJsonCell(row['消费分片']) as
+          | { planned_shard_indexes?: number[]; consumable_shard_indexes?: number[] }
+          | null
+        notices.push({
+          key: `recon-wait-${row.id}-${index}`,
+          text: `对账 ${row['对账编号']}（批次 ${row['批次编号']}，代际 ${row['暂存代际']}）等待新清单确认后自动续做；规划分片 ${scope?.planned_shard_indexes?.join(',') || '—'}，当前可消费分片 ${scope?.consumable_shard_indexes?.join(',') || '无'}，恢复期间不产生回执。`,
+        })
+      })
+    rows.value
+      .filter((row) => ['已平账', '存在差异'].includes(String(row.status)) && row['回执编号'])
+      .forEach((row, index) => {
+        notices.push({
+          key: `recon-done-${row.id}-${index}`,
+          text: `对账 ${row['对账编号']} 已按代际 ${row['暂存代际']} 清单 ${row['清单编号']} 完成结算（${row.status}，实到 ${row['实到条数']}/${row['应到条数']}），业务回执 ${row['回执编号']}。`,
+        })
+      })
+  }
+  return notices
+})
 
 function resetFilters() {
   filters.value = {}

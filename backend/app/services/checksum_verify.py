@@ -62,12 +62,21 @@ class ChecksumVerifyService(BaseModuleService):
         batch_file = self._data_dir("batches") / f"{batch_code}.jsonl"
         batch_records = self._read_jsonl(batch_file)
 
-        # 从暂存产品目录查找对应落地产物文件（目标端数据）
-        staging_dir = self._data_dir("staging")
+        # 读取暂存落地产物（目标端数据）：优先按可确认落地清单读取已确认分片，
+        # 兼容历史扁平布局的暂存文件
         staging_records = []
-        for staging_file in staging_dir.glob(f"*{batch_code}*.jsonl"):
-            staging_records = self._read_jsonl(staging_file)
-            break
+        try:
+            sa_svc = self._safe_import("app.services.staging_area", "StagingAreaService")()
+            manifest = sa_svc.latest_confirmed_manifest(batch_code)
+            if manifest is not None:
+                staging_records = sa_svc.read_manifest_records(manifest)
+        except Exception:
+            manifest = None
+        if not staging_records:
+            staging_dir = self._data_dir("staging")
+            for staging_file in staging_dir.rglob(f"*{batch_code}*.jsonl"):
+                staging_records = self._read_jsonl(staging_file)
+                break
 
         # 计算源端与目标端校验值
         source_checksum = self._compute_checksum(str(batch_records))

@@ -123,6 +123,24 @@ class BaseModuleService:
                 written += 1
         return written
 
+    def _atomic_write_jsonl(self, filepath: Path, records: list[dict[str, Any]]) -> int:
+        """整体原子写入 jsonl 文件：先写临时文件再 rename，避免分片写到一半被下游读到。"""
+        _ensure_dir(filepath.parent)
+        tmp_file = filepath.with_name(filepath.name + ".tmp")
+        with open(tmp_file, "w", encoding="utf-8") as f:
+            for rec in records:
+                f.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
+        os.replace(tmp_file, filepath)
+        return len(records)
+
+    def _atomic_write_json(self, filepath: Path, payload: dict[str, Any]) -> None:
+        """原子写入 JSON 清单文件，保证可确认落地清单要么是旧版要么是新版，不会出现半份清单。"""
+        _ensure_dir(filepath.parent)
+        tmp_file = filepath.with_name(filepath.name + ".tmp")
+        with open(tmp_file, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2, default=str)
+        os.replace(tmp_file, filepath)
+
     def _read_jsonl(self, filepath: Path) -> list[dict[str, Any]]:
         """从磁盘 jsonl 文件中读取全部记录，解析为标准字典列表。"""
         if not filepath.exists():
